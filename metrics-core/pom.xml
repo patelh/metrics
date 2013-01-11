@@ -10,6 +10,7 @@
 
     <artifactId>metrics-core</artifactId>
     <name>Metrics Core Library</name>
+    <version>2.2.0-1</version>
 
     <dependencies>
         <dependency>

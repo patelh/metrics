@@ -4,21 +4,27 @@ import com.yammer.metrics.core.*;
 import com.yammer.metrics.reporting.JmxReporter;
 
 import java.util.concurrent.TimeUnit;
+import java.lang.Runnable;
+import java.lang.Thread;
+import java.lang.Thread.State;
 
 /**
  * A set of factory methods for creating centrally registered metric instances.
  */
 public class Metrics {
     private static final MetricsRegistry DEFAULT_REGISTRY = new MetricsRegistry();
-    private static final Thread SHUTDOWN_HOOK = new Thread() {
-        public void run() {
-            JmxReporter.shutdownDefault();
-        }
-    };
+    private static Thread SHUTDOWN_HOOK = null;
 
-    static {
-        JmxReporter.startDefault(DEFAULT_REGISTRY);
-        Runtime.getRuntime().addShutdownHook(SHUTDOWN_HOOK);
+    public static synchronized void registerWithJmxReporter() {
+        if(SHUTDOWN_HOOK == null) {
+            JmxReporter.startDefault(DEFAULT_REGISTRY);
+            SHUTDOWN_HOOK = new Thread() {
+                public void run() {
+                    JmxReporter.shutdownDefault();
+                }
+            };
+            Runtime.getRuntime().addShutdownHook(SHUTDOWN_HOOK);
+        }
     }
 
     private Metrics() { /* unused */ }
@@ -336,9 +342,18 @@ public class Metrics {
     /**
      * Shuts down all thread pools for the default registry.
      */
-    public static void shutdown() {
+    public static synchronized void shutdown() {
+        if(SHUTDOWN_HOOK!=null && Runtime.getRuntime().removeShutdownHook(SHUTDOWN_HOOK)) {
+            try {
+              SHUTDOWN_HOOK.stop();
+              SHUTDOWN_HOOK.join();
+            } catch (Throwable t) {
+              t.printStackTrace();
+            } finally {
+              JmxReporter.shutdownDefault();
+              SHUTDOWN_HOOK=null;
+            }
+        }
         DEFAULT_REGISTRY.shutdown();
-        JmxReporter.shutdownDefault();
-        Runtime.getRuntime().removeShutdownHook(SHUTDOWN_HOOK);
     }
 }
