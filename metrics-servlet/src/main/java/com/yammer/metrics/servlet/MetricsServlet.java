@@ -6,10 +6,6 @@ import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yammer.metrics.Metrics;
 import com.yammer.metrics.core.*;
-import com.yammer.metrics.reporting.MetricDispatcher;
-import com.yammer.metrics.stats.Snapshot;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import javax.servlet.ServletConfig;
 import javax.servlet.ServletException;
@@ -18,9 +14,6 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.util.Map;
-import java.util.SortedMap;
-import java.util.concurrent.TimeUnit;
 
 /**
  * An HTTP servlet which outputs the metrics in a {@link MetricsRegistry} (and optionally the data
@@ -61,7 +54,7 @@ import java.util.concurrent.TimeUnit;
  *     </dd>
  * </dl>
  */
-public class MetricsServlet extends HttpServlet implements MetricProcessor<MetricsServlet.Context> {
+public class MetricsServlet extends HttpServlet {
 
     /**
      * The attribute name of the {@link MetricsRegistry} instance in the servlet context.
@@ -79,18 +72,7 @@ public class MetricsServlet extends HttpServlet implements MetricProcessor<Metri
      */
     public static final String SHOW_JVM_METRICS = "show-jvm-metrics";
 
-    static final class Context {
-        final boolean showFullSamples;
-        final JsonGenerator json;
-
-        Context(JsonGenerator json, boolean showFullSamples) {
-            this.json = json;
-            this.showFullSamples = showFullSamples;
-        }
-    }
-
     private static final JsonFactory DEFAULT_JSON_FACTORY = new JsonFactory(new ObjectMapper());
-    private static final Logger LOGGER = LoggerFactory.getLogger(MetricsServlet.class);
     private static final String CONTENT_TYPE = "application/json";
 
     private final Clock clock;
@@ -98,6 +80,8 @@ public class MetricsServlet extends HttpServlet implements MetricProcessor<Metri
     private MetricsRegistry registry;
     private JsonFactory factory;
     private boolean showJvmMetrics;
+    private MetricsJsonGenerator metricsJsonGenerator;
+    private MetricsJsonGenerator.MetricsContext metricsContext;
 
     /**
      * Creates a new {@link MetricsServlet}.
@@ -136,6 +120,8 @@ public class MetricsServlet extends HttpServlet implements MetricProcessor<Metri
         this.registry = registry;
         this.factory = factory;
         this.showJvmMetrics = showJvmMetrics;
+        this.metricsJsonGenerator = new MetricsJsonGenerator();
+        this.metricsContext = new MetricsJsonGenerator.MetricsContext(this.clock,this.vm,this.registry);
     }
 
     @Override
@@ -149,6 +135,7 @@ public class MetricsServlet extends HttpServlet implements MetricProcessor<Metri
         final Object o = config.getServletContext().getAttribute(REGISTRY_ATTRIBUTE);
         if (o instanceof MetricsRegistry) {
             this.registry = (MetricsRegistry) o;
+            this.metricsContext = new MetricsJsonGenerator.MetricsContext(this.clock,this.vm,this.registry);
         }
 
         final String showJvmMetricsParam = config.getInitParameter(SHOW_JVM_METRICS);
@@ -173,249 +160,12 @@ public class MetricsServlet extends HttpServlet implements MetricProcessor<Metri
         json.writeStartObject();
         {
             if (showJvmMetrics && ("jvm".equals(classPrefix) || classPrefix == null)) {
-                writeVmMetrics(json);
+                metricsJsonGenerator.writeVmMetrics(json, this.metricsContext);
             }
 
-            writeRegularMetrics(json, classPrefix, showFullSamples);
+            metricsJsonGenerator.writeRegularMetrics(json, classPrefix, showFullSamples, this.metricsContext);
         }
         json.writeEndObject();
         json.close();
-    }
-
-    private void writeVmMetrics(JsonGenerator json) throws IOException {
-        json.writeFieldName("jvm");
-        json.writeStartObject();
-        {
-            json.writeFieldName("vm");
-            json.writeStartObject();
-            {
-                json.writeStringField("name", vm.getName());
-                json.writeStringField("version", vm.getVersion());
-            }
-            json.writeEndObject();
-
-            json.writeFieldName("memory");
-            json.writeStartObject();
-            {
-                json.writeNumberField("totalInit", vm.getTotalInit());
-                json.writeNumberField("totalUsed", vm.getTotalUsed());
-                json.writeNumberField("totalMax", vm.getTotalMax());
-                json.writeNumberField("totalCommitted", vm.getTotalCommitted());
-
-                json.writeNumberField("heapInit", vm.getHeapInit());
-                json.writeNumberField("heapUsed", vm.getHeapUsed());
-                json.writeNumberField("heapMax", vm.getHeapMax());
-                json.writeNumberField("heapCommitted", vm.getHeapCommitted());
-
-                json.writeNumberField("heap_usage", vm.getHeapUsage());
-                json.writeNumberField("non_heap_usage", vm.getNonHeapUsage());
-                json.writeFieldName("memory_pool_usages");
-                json.writeStartObject();
-                {
-                    for (Map.Entry<String, Double> pool : vm.getMemoryPoolUsage().entrySet()) {
-                        json.writeNumberField(pool.getKey(), pool.getValue());
-                    }
-                }
-                json.writeEndObject();
-            }
-            json.writeEndObject();
-
-            final Map<String, VirtualMachineMetrics.BufferPoolStats> bufferPoolStats = vm.getBufferPoolStats();
-            if (!bufferPoolStats.isEmpty()) {
-                json.writeFieldName("buffers");
-                json.writeStartObject();
-                {
-                    json.writeFieldName("direct");
-                    json.writeStartObject();
-                    {
-                        json.writeNumberField("count", bufferPoolStats.get("direct").getCount());
-                        json.writeNumberField("memoryUsed", bufferPoolStats.get("direct").getMemoryUsed());
-                        json.writeNumberField("totalCapacity", bufferPoolStats.get("direct").getTotalCapacity());
-                    }
-                    json.writeEndObject();
-
-                    json.writeFieldName("mapped");
-                    json.writeStartObject();
-                    {
-                        json.writeNumberField("count", bufferPoolStats.get("mapped").getCount());
-                        json.writeNumberField("memoryUsed", bufferPoolStats.get("mapped").getMemoryUsed());
-                        json.writeNumberField("totalCapacity", bufferPoolStats.get("mapped").getTotalCapacity());
-                    }
-                    json.writeEndObject();
-                }
-                json.writeEndObject();
-            }
-
-
-            json.writeNumberField("daemon_thread_count", vm.getDaemonThreadCount());
-            json.writeNumberField("thread_count", vm.getThreadCount());
-            json.writeNumberField("current_time", clock.getTime());
-            json.writeNumberField("uptime", vm.getUptime());
-            json.writeNumberField("fd_usage", vm.getFileDescriptorUsage());
-
-            json.writeFieldName("thread-states");
-            json.writeStartObject();
-            {
-                for (Map.Entry<Thread.State, Double> entry : vm.getThreadStatePercentages()
-                                                               .entrySet()) {
-                    json.writeNumberField(entry.getKey().toString().toLowerCase(),
-                                          entry.getValue());
-                }
-            }
-            json.writeEndObject();
-
-            json.writeFieldName("garbage-collectors");
-            json.writeStartObject();
-            {
-                for (Map.Entry<String, VirtualMachineMetrics.GarbageCollectorStats> entry : vm.getGarbageCollectors()
-                                                                                              .entrySet()) {
-                    json.writeFieldName(entry.getKey());
-                    json.writeStartObject();
-                    {
-                        final VirtualMachineMetrics.GarbageCollectorStats gc = entry.getValue();
-                        json.writeNumberField("runs", gc.getRuns());
-                        json.writeNumberField("time", gc.getTime(TimeUnit.MILLISECONDS));
-                    }
-                    json.writeEndObject();
-                }
-            }
-            json.writeEndObject();
-        }
-        json.writeEndObject();
-    }
-
-    public void writeRegularMetrics(JsonGenerator json, String classPrefix, boolean showFullSamples) throws IOException {
-        final MetricDispatcher dispatcher = new MetricDispatcher();
-        for (Map.Entry<String, SortedMap<MetricName, Metric>> entry : registry.getGroupedMetrics().entrySet()) {
-            if (classPrefix == null || entry.getKey().startsWith(classPrefix)) {
-                json.writeFieldName(entry.getKey());
-                json.writeStartObject();
-                {
-                    for (Map.Entry<MetricName, Metric> subEntry : entry.getValue().entrySet()) {
-                        json.writeFieldName(subEntry.getKey().getName());
-                        try {
-                            dispatcher.dispatch(subEntry.getValue(), subEntry.getKey(), this, new Context(json, showFullSamples));
-                        } catch (Exception e) {
-                            LOGGER.warn("Error writing out " + subEntry.getKey(), e);
-                        }
-                    }
-                }
-                json.writeEndObject();
-            }
-        }
-    }
-
-    @Override
-    public void processHistogram(MetricName name, Histogram histogram, Context context) throws Exception {
-        final JsonGenerator json = context.json;
-        json.writeStartObject();
-        {
-            json.writeStringField("type", "histogram");
-            json.writeNumberField("count", histogram.getCount());
-            writeSummarizable(histogram, json);
-            writeSampling(histogram, json);
-
-            if (context.showFullSamples) {
-                json.writeObjectField("values", histogram.getSnapshot().getValues());
-            }
-        }
-        json.writeEndObject();
-    }
-
-    @Override
-    public void processCounter(MetricName name, Counter counter, Context context) throws Exception {
-        final JsonGenerator json = context.json;
-        json.writeStartObject();
-        {
-            json.writeStringField("type", "counter");
-            json.writeNumberField("count", counter.getCount());
-        }
-        json.writeEndObject();
-    }
-
-    @Override
-    public void processGauge(MetricName name, Gauge<?> gauge, Context context) throws Exception {
-        final JsonGenerator json = context.json;
-        json.writeStartObject();
-        {
-            json.writeStringField("type", "gauge");
-            json.writeObjectField("value", evaluateGauge(gauge));
-        }
-        json.writeEndObject();
-    }
-
-    @Override
-    public void processMeter(MetricName name, Metered meter, Context context) throws Exception {
-        final JsonGenerator json = context.json;
-        json.writeStartObject();
-        {
-            json.writeStringField("type", "meter");
-            json.writeStringField("event_type", meter.getEventType());
-            writeMeteredFields(meter, json);
-        }
-        json.writeEndObject();
-    }
-
-    @Override
-    public void processTimer(MetricName name, Timer timer, Context context) throws Exception {
-        final JsonGenerator json = context.json;
-        json.writeStartObject();
-        {
-            json.writeStringField("type", "timer");
-            json.writeFieldName("duration");
-            json.writeStartObject();
-            {
-                json.writeStringField("unit", timer.getDurationUnit().toString().toLowerCase());
-                writeSummarizable(timer, json);
-                writeSampling(timer, json);
-                if (context.showFullSamples) {
-                    json.writeObjectField("values", timer.getSnapshot().getValues());
-                }
-            }
-            json.writeEndObject();
-
-            json.writeFieldName("rate");
-            json.writeStartObject();
-            {
-                writeMeteredFields(timer, json);
-            }
-            json.writeEndObject();
-        }
-        json.writeEndObject();
-    }
-
-    private static Object evaluateGauge(Gauge<?> gauge) {
-        try {
-            return gauge.getValue();
-        } catch (RuntimeException e) {
-            LOGGER.warn("Error evaluating gauge", e);
-            return "error reading gauge: " + e.getMessage();
-        }
-    }
-
-    private static void writeSummarizable(Summarizable metric, JsonGenerator json) throws IOException {
-        json.writeNumberField("min", metric.getMin());
-        json.writeNumberField("max", metric.getMax());
-        json.writeNumberField("mean", metric.getMean());
-        json.writeNumberField("std_dev", metric.getStdDev());
-    }
-
-    private static void writeSampling(Sampling metric, JsonGenerator json) throws IOException {
-        final Snapshot snapshot = metric.getSnapshot();
-        json.writeNumberField("median", snapshot.getMedian());
-        json.writeNumberField("p75", snapshot.get75thPercentile());
-        json.writeNumberField("p95", snapshot.get95thPercentile());
-        json.writeNumberField("p98", snapshot.get98thPercentile());
-        json.writeNumberField("p99", snapshot.get99thPercentile());
-        json.writeNumberField("p999", snapshot.get999thPercentile());
-    }
-
-    private static void writeMeteredFields(Metered metered, JsonGenerator json) throws IOException {
-        json.writeStringField("unit", metered.getRateUnit().toString().toLowerCase());
-        json.writeNumberField("count", metered.getCount());
-        json.writeNumberField("mean", metered.getMeanRate());
-        json.writeNumberField("m1", metered.getOneMinuteRate());
-        json.writeNumberField("m5", metered.getFiveMinuteRate());
-        json.writeNumberField("m15", metered.getFifteenMinuteRate());
     }
 }
